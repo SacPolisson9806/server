@@ -52,15 +52,28 @@ io.on("connection", (socket) => {
 
   // ✅ Lancer le quiz
   socket.on("startGame", ({ room, selectedTheme, pointsToWin, timePerQuestion }) => {
-    const fs = require("fs");
-    const filePath = `./data/${selectedTheme.toLowerCase()}.json`;
-    if (fs.existsSync(filePath)) {
-      const questions = JSON.parse(fs.readFileSync(filePath));
-      io.to(room).emit("startQuestions", { questions });
-    } else {
-      socket.emit("message", `❌ Thème "${selectedTheme}" introuvable.`);
-    }
-  });
+  const fs = require("fs");
+  const filePath = `./data/${selectedTheme.toLowerCase()}.json`;
+
+  if (fs.existsSync(filePath)) {
+    const questions = JSON.parse(fs.readFileSync(filePath));
+    
+    // ✅ Envoyer les questions à tous les joueurs
+    io.to(room).emit("startQuestions", {
+      questions,
+      selectedThemes: [selectedTheme],
+      pointsToWin,
+      timePerQuestion,
+      room
+    });
+
+    // ✅ Envoyer un signal de démarrage
+    io.to(room).emit("launchGame");
+  } else {
+    socket.emit("message", `❌ Thème "${selectedTheme}" introuvable.`);
+  }
+});
+
 
   // ✅ Réception des réponses
   socket.on("submitAnswer", ({ room, username, questionIndex, answer }) => {
