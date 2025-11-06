@@ -49,7 +49,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("startGame", ({ room, selectedTheme, pointsToWin, timePerQuestion }) => {
-    const filePath = `./data/${selectedTheme.toLowerCase()}.json`;
+    const filePath = `./public/${selectedTheme.toLowerCase()}.json`;
 
     if (fs.existsSync(filePath)) {
       const questions = JSON.parse(fs.readFileSync(filePath));
