@@ -2,10 +2,11 @@ const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
+const fs = require("fs");
 
 const app = express();
 app.use(cors({
-  origin: "https://chic-torte-4d4c16.netlify.app", // ton app React
+  origin: "https://chic-torte-4d4c16.netlify.app",
   methods: ["GET", "POST"]
 }));
 
@@ -17,65 +18,57 @@ const io = new Server(server, {
   }
 });
 
-// 🧠 Structure pour stocker les joueurs par salle
-const rooms = {}; // { roomName: [ { id, username } ] }
+const rooms = {}; // { roomName: [ { id, username, score, answers } ], questions }
 
 io.on("connection", (socket) => {
   console.log("🟢 Nouveau joueur connecté :", socket.id);
 
-  // ✅ Rejoindre une salle existante
   socket.on("joinRoom", ({ username, room }) => {
     socket.join(room);
     socket.username = username;
     socket.room = room;
 
     if (!rooms[room]) rooms[room] = [];
-    rooms[room].push({ id: socket.id, username });
+    rooms[room].push({ id: socket.id, username, score: 0 });
 
     console.log(`${username} a rejoint la salle ${room}`);
     io.to(room).emit("updatePlayers", rooms[room].map(p => p.username));
     socket.to(room).emit("message", `${username} a rejoint la partie.`);
   });
 
-  // ✅ Créer une nouvelle salle
   socket.on("createRoom", ({ username, room }) => {
     socket.join(room);
     socket.username = username;
     socket.room = room;
 
-    rooms[room] = [{ id: socket.id, username }];
+    rooms[room] = [{ id: socket.id, username, score: 0 }];
 
     console.log(`🎮 ${username} a créé la salle ${room}`);
     io.to(room).emit("updatePlayers", rooms[room].map(p => p.username));
     socket.emit("message", `Salon ${room} créé avec succès.`);
   });
 
-  // ✅ Lancer le quiz
   socket.on("startGame", ({ room, selectedTheme, pointsToWin, timePerQuestion }) => {
-  const fs = require("fs");
-  const filePath = `./data/${selectedTheme.toLowerCase()}.json`;
+    const filePath = `./data/${selectedTheme.toLowerCase()}.json`;
 
-  if (fs.existsSync(filePath)) {
-    const questions = JSON.parse(fs.readFileSync(filePath));
-    
-    // ✅ Envoyer les questions à tous les joueurs
-    io.to(room).emit("startQuestions", {
-      questions,
-      selectedThemes: [selectedTheme],
-      pointsToWin,
-      timePerQuestion,
-      room
-    });
+    if (fs.existsSync(filePath)) {
+      const questions = JSON.parse(fs.readFileSync(filePath));
+      rooms[room].questions = questions;
 
-    // ✅ Envoyer un signal de démarrage
-    io.to(room).emit("launchGame");
-  } else {
-    socket.emit("message", `❌ Thème "${selectedTheme}" introuvable.`);
-  }
-});
+      io.to(room).emit("startQuestions", {
+        questions,
+        selectedThemes: [selectedTheme],
+        pointsToWin,
+        timePerQuestion,
+        room
+      });
 
+      io.to(room).emit("launchGame");
+    } else {
+      socket.emit("message", `❌ Thème "${selectedTheme}" introuvable.`);
+    }
+  });
 
-  // ✅ Réception des réponses
   socket.on("submitAnswer", ({ room, username, questionIndex, answer }) => {
     if (!rooms[room]) return;
     const player = rooms[room].find(p => p.username === username);
@@ -84,31 +77,35 @@ io.on("connection", (socket) => {
 
     const allAnswered = rooms[room].every(p => p.answers && p.answers[questionIndex] !== undefined);
     if (allAnswered) {
-      const correctAnswer = "TODO"; // à remplacer par la vraie réponse
+      const correctAnswer = rooms[room].questions[questionIndex].answer;
+
       io.to(room).emit("showAnswer", { correctAnswer });
 
-      // Mise à jour des scores (exemple simple)
       rooms[room].forEach(p => {
-        if (!p.score) p.score = 0;
-        if (p.answers[questionIndex] === correctAnswer) {
-          p.score += 10;
-        }
+        const isCorrect = Array.isArray(correctAnswer)
+          ? correctAnswer.some(ans => ans.toLowerCase() === p.answers[questionIndex]?.toLowerCase())
+          : correctAnswer.toLowerCase() === p.answers[questionIndex]?.toLowerCase();
+
+        if (isCorrect) p.score += 10;
       });
 
       io.to(room).emit("scoreUpdate", rooms[room].map(p => ({
         username: p.username,
         score: p.score
       })));
+
+      rooms[room].forEach(p => {
+        if (p.answers) delete p.answers[questionIndex];
+      });
     }
   });
 
-  // ✅ Timer écoulé
   socket.on("timeout", ({ room, questionIndex }) => {
-    const correctAnswer = "TODO"; // à remplacer par la vraie réponse
+    if (!rooms[room]) return;
+    const correctAnswer = rooms[room].questions[questionIndex].answer;
     io.to(room).emit("showAnswer", { correctAnswer });
   });
 
-  // ✅ Déconnexion
   socket.on("disconnect", () => {
     console.log("🔴 Joueur déconnecté :", socket.id);
     const room = socket.room;
@@ -124,7 +121,6 @@ io.on("connection", (socket) => {
   });
 });
 
-// 🚀 Démarrer le serveur
 server.listen(4000, () => {
   console.log("✅ Serveur Socket.IO lancé sur http://localhost:4000");
 });
