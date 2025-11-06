@@ -17,44 +17,101 @@ const io = new Server(server, {
   }
 });
 
+// 🧠 Structure pour stocker les joueurs par salle
+const rooms = {}; // { roomName: [ { id, username } ] }
+
 io.on("connection", (socket) => {
   console.log("🟢 Nouveau joueur connecté :", socket.id);
 
-  // ✅ Rejoindre une salle
+  // ✅ Rejoindre une salle existante
   socket.on("joinRoom", ({ username, room }) => {
     socket.join(room);
     socket.username = username;
     socket.room = room;
 
+    if (!rooms[room]) rooms[room] = [];
+    rooms[room].push({ id: socket.id, username });
+
     console.log(`${username} a rejoint la salle ${room}`);
+    io.to(room).emit("updatePlayers", rooms[room].map(p => p.username));
     socket.to(room).emit("message", `${username} a rejoint la partie.`);
   });
 
-  // ✅ Créer une salle
+  // ✅ Créer une nouvelle salle
   socket.on("createRoom", ({ username, room }) => {
     socket.join(room);
     socket.username = username;
     socket.room = room;
 
+    rooms[room] = [{ id: socket.id, username }];
+
     console.log(`🎮 ${username} a créé la salle ${room}`);
+    io.to(room).emit("updatePlayers", rooms[room].map(p => p.username));
     socket.emit("message", `Salon ${room} créé avec succès.`);
   });
 
-  // ✅ Action de jeu (exemple : déplacement, réponse au quiz, etc.)
-  socket.on("move", ({ room, data }) => {
-    socket.to(room).emit("updateGame", data);
+  // ✅ Lancer le quiz
+  socket.on("startGame", ({ room, selectedTheme, pointsToWin, timePerQuestion }) => {
+    const fs = require("fs");
+    const filePath = `./data/${selectedTheme.toLowerCase()}.json`;
+    if (fs.existsSync(filePath)) {
+      const questions = JSON.parse(fs.readFileSync(filePath));
+      io.to(room).emit("startQuestions", { questions });
+    } else {
+      socket.emit("message", `❌ Thème "${selectedTheme}" introuvable.`);
+    }
+  });
+
+  // ✅ Réception des réponses
+  socket.on("submitAnswer", ({ room, username, questionIndex, answer }) => {
+    if (!rooms[room]) return;
+    const player = rooms[room].find(p => p.username === username);
+    if (!player.answers) player.answers = {};
+    player.answers[questionIndex] = answer;
+
+    const allAnswered = rooms[room].every(p => p.answers && p.answers[questionIndex] !== undefined);
+    if (allAnswered) {
+      const correctAnswer = "TODO"; // à remplacer par la vraie réponse
+      io.to(room).emit("showAnswer", { correctAnswer });
+
+      // Mise à jour des scores (exemple simple)
+      rooms[room].forEach(p => {
+        if (!p.score) p.score = 0;
+        if (p.answers[questionIndex] === correctAnswer) {
+          p.score += 10;
+        }
+      });
+
+      io.to(room).emit("scoreUpdate", rooms[room].map(p => ({
+        username: p.username,
+        score: p.score
+      })));
+    }
+  });
+
+  // ✅ Timer écoulé
+  socket.on("timeout", ({ room, questionIndex }) => {
+    const correctAnswer = "TODO"; // à remplacer par la vraie réponse
+    io.to(room).emit("showAnswer", { correctAnswer });
   });
 
   // ✅ Déconnexion
   socket.on("disconnect", () => {
     console.log("🔴 Joueur déconnecté :", socket.id);
-    if (socket.room && socket.username) {
-      socket.to(socket.room).emit("message", `${socket.username} a quitté la partie.`);
+    const room = socket.room;
+    if (room && rooms[room]) {
+      rooms[room] = rooms[room].filter(p => p.id !== socket.id);
+      io.to(room).emit("updatePlayers", rooms[room].map(p => p.username));
+      socket.to(room).emit("message", `${socket.username} a quitté la partie.`);
+
+      if (rooms[room].length === 0) {
+        delete rooms[room];
+      }
     }
   });
 });
 
-// ⚙️ Démarrer le serveur sur le bon port
+// 🚀 Démarrer le serveur
 server.listen(4000, () => {
   console.log("✅ Serveur Socket.IO lancé sur http://localhost:4000");
 });
