@@ -6,14 +6,14 @@ const fs = require("fs");
 
 const app = express();
 app.use(cors({
-  origin: "https://chic-torte-4d4c16.netlify.app",
+  origin: "https://localhost:5173/",
   methods: ["GET", "POST"]
 }));
 
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: "https://chic-torte-4d4c16.netlify.app",
+    origin: "https://localhost:5173/",
     methods: ["GET", "POST"]
   }
 });
@@ -124,5 +124,5 @@ io.on("connection", (socket) => {
 });
 
 server.listen(4000, () => {
-  console.log("✅ Serveur Socket.IO lancé sur http://localhost:4000");
+  console.log("✅ Serveur Socket.IO lancé sur https://localhost:4000");
 });
