@@ -179,16 +179,17 @@ server.listen(PORT, () => {
 });
 
 //----------------------score-------------------------------
-// 🔹 Récupérer le classement d’un jeu
+// 🔹 Récupérer le classement d’un jeu (meilleur score par joueur)
 app.get("/scores/:game", async (req, res) => {
   const { game } = req.params;
   try {
     await sql.connect(config);
     const result = await sql.query`
-      SELECT Username, Score, DateAchieved
+      SELECT Username, MAX(Score) AS Score, MAX(DateAchieved) AS DateAchieved
       FROM Scores
       WHERE Game = ${game}
-      ORDER BY Score DESC
+      GROUP BY Username
+      ORDER BY MAX(Score) DESC
     `;
     res.json({ success: true, scores: result.recordset });
   } catch (err) {
@@ -197,7 +198,8 @@ app.get("/scores/:game", async (req, res) => {
   }
 });
 
-// 🔹 Ajouter un score
+
+// 🔹 Ajouter un score (avec date automatique)
 app.post("/scores", async (req, res) => {
   const { username, game, score } = req.body;
 
@@ -208,7 +210,8 @@ app.post("/scores", async (req, res) => {
   try {
     await sql.connect(config);
     await sql.query`
-      INSERT INTO Scores (Username, Game, Score) VALUES (${username}, ${game}, ${score})
+      INSERT INTO Scores (Username, Game, Score, DateAchieved)
+      VALUES (${username}, ${game}, ${score}, GETDATE())
     `;
     res.json({ success: true, message: "Score enregistré !" });
   } catch (err) {
@@ -216,4 +219,3 @@ app.post("/scores", async (req, res) => {
     res.status(500).json({ success: false, message: "Erreur serveur" });
   }
 });
-
