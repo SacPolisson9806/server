@@ -24,6 +24,7 @@ const config = {
 
 // ------------------- Routes HTTP -------------------
 
+
 // 🔹 Signup
 app.post("/signup", async (req, res) => {
   const { username, password } = req.body;
@@ -176,6 +177,29 @@ io.on("connection", (socket) => {
 const PORT = 5000;
 server.listen(PORT, () => {
   console.log(`Serveur combiné démarré sur http://localhost:${PORT}`);
+});
+
+app.get("/getScore/:username/:game", async (req, res) => {
+  let { username, game } = req.params;
+  username = username.trim();
+  game = game.trim();
+  try {
+    await sql.connect(config);
+    const result = await sql.query`
+      SELECT TOP 1 Score, DateAchieved
+      FROM Scores
+      WHERE Username = ${username} AND Game = ${game}
+      ORDER BY DateAchieved DESC
+    `;
+    console.log(result.recordset.length);
+    if (result.recordset.length === 0) {
+      return res.json({ success: true, score: 0 });
+    }
+    res.json({ success: true, score: result.recordset[0].Score });
+  } catch (err) {
+    console.error("Erreur getScore :", err);
+    res.status(500).json({ success: false, message: "Erreur serveur" });
+  }
 });
 
 //----------------------score-------------------------------
