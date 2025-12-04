@@ -127,34 +127,52 @@ app.post("/signup", async (req, res) => {
   }
 });
 
-
-
 // 🔹 Login
-app.post("/login", loginLimiter, async (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password)
-    return res.status(400).json({ success: false, message: "Pseudo ou mot de passe manquant" });
-
+app.post("/login", async (req, res) => {
   try {
+    const { username, password } = req.body;
+
     await sql.connect(config);
-    const result = await sql.query`SELECT * FROM Users WHERE Username = ${username}`;
-    if (result.recordset.length === 0)
-      return res.status(400).json({ success: false, message: "Pseudo ou mot de passe incorrect." });
+
+    const result = await sql.query`
+      SELECT Username, PasswordHash
+      FROM Users
+      WHERE Username = ${username}
+    `;
+
+    if (result.recordset.length === 0) {
+      return res.json({ success: false, message: "Utilisateur introuvable." });
+    }
 
     const user = result.recordset[0];
-    const match = await bcrypt.compare(password, user.PasswordHash);
-    if (!match) return res.status(400).json({ success: false, message: "Pseudo ou mot de passe incorrect." });
 
-    // 🔹 Génération token JWT avec expiration
-    const token = jwt.sign({ username }, SECRET, { expiresIn: "24h" });
+    const isMatch = await bcrypt.compare(password, user.PasswordHash);
+    if (!isMatch) {
+      return res.json({ success: false, message: "Mot de passe incorrect." });
+    }
 
-    console.log("Connexion réussie pour :", username);
-    res.json({ success: true, message: "Connexion réussie", token });
+    // 🔥 IMPORTANT : on garantit AUCUNE redirection 2FA
+    const token = jwt.sign(
+      { username: user.Username },
+      SECRET,
+      { expiresIn: "30d" }
+    );
+
+    return res.json({
+      success: true,
+      message: "Connexion réussie !",
+      token,
+      redirect: "../hubjeux" // facultatif mais propre
+    });
+
   } catch (err) {
     console.error("Erreur login :", err);
-    res.status(500).json({ success: false, message: "Erreur serveur, réessaie plus tard." });
+    return res.json({ success: false, message: "Erreur serveur." });
   }
 });
+
+
+
 
 // ----------------- Scores -----------------
 app.post("/scores", authMiddleware, async (req, res) => {
