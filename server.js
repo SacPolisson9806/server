@@ -27,7 +27,7 @@ const app = express();
 const SECRET = process.env.JWT_SECRET || "super_secret_prod"; // 🔹 mettre dans .env
 
 // ----------------- Middleware -----------------
-app.use(cors({ origin: "http://localhost:5173" })); // React frontend
+app.use(cors({ origin: "https://chic-torte-4d4c16.netlify.app" })); // React frontend
 app.use(express.json());
 
 // 🔹 Rate limiting sur login pour éviter brute force
