@@ -1,276 +1,389 @@
-// server.js
 /**
- * Serveur Node.js sécurisé pour site de jeux
- * Backend Express + Socket.IO + SQL Server
- * Sécurités incluses :
- * - JWT pour authentification (HTTP + Socket.IO)
- * - Middleware auth pour routes sensibles
- * - Rate limiting sur login pour éviter brute force
- * - Hashage de mots de passe avec bcrypt
- * - Validation mot de passe RGPD
- * - Comptes admin/test exemptés de certaines règles
- * - Préparation pour 2FA et renouvellement mot de passe
+ * server.js (COMPLET)
+ *
+ * Serveur Node.js pour ton hub de jeux :
+ * - Express HTTP (auth, scores, questions)
+ * - Socket.IO (multijoueur synchronisé pour Quizz)
+ * - Stockage SQL Server (mssql) pour Users / Scores (optionnel si pas configuré)
+ * - Chargement des questions depuis `public/<theme>.json`
+ *
+ * IMPORTANT :
+ * - Mettre les variables d'environnement dans .env : DB_USER, DB_PASSWORD, DB_SERVER, DB_NAME, JWT_SECRET
+ * - Installer les dépendances : express, mssql, bcrypt, cors, socket.io, dotenv, jsonwebtoken, express-rate-limit
+ *
+ * Usage :
+ *   node server.js
  */
 
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
-const sql = require("mssql");
+const sql = require("mssql"); // facultatif si tu ne veux pas la DB
 const bcrypt = require("bcrypt");
 const cors = require("cors");
 const fs = require("fs");
+const path = require("path");
 const jwt = require("jsonwebtoken");
 const rateLimit = require("express-rate-limit");
-require("dotenv").config(); // pour JWT_SECRET et DB credentials
+require("dotenv").config();
 
 const app = express();
-const SECRET = process.env.JWT_SECRET || "super_secret_prod"; // 🔹 mettre dans .env
+const SECRET = process.env.JWT_SECRET || "super_secret_prod";
 
-// ----------------- Middleware -----------------
-app.use(cors({ origin: "https://chic-torte-4d4c16.netlify.app" })); // React frontend
+// ----------------- Configs -----------------
+const FRONTEND_ORIGINS = [
+  "https://chic-torte-4d4c16.netlify.app",
+  "http://localhost:5173",
+  "http://localhost:3000"
+];
+
+// CORS
+app.use(cors({
+  origin: (origin, cb) => {
+    // allow if no origin (curl/postman) or in whitelist
+    if (!origin || FRONTEND_ORIGINS.includes(origin)) cb(null, true);
+    else cb(new Error("Origin non autorisée"));
+  },
+  credentials: true
+}));
+
 app.use(express.json());
+app.use(express.static(path.join(__dirname, "public"))); // sert les JSON/questions statiques
 
-// 🔹 Rate limiting sur login pour éviter brute force
+// Rate limiter login
 const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 min
-  max: 10, // max 10 tentatives
+  windowMs: 15 * 60 * 1000,
+  max: 12,
   message: { success: false, message: "Trop de tentatives, réessaie plus tard." }
 });
 
-// ----------------- Config SQL -----------------
-const config = {
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  server: process.env.DB_SERVER,
-  database: process.env.DB_NAME,
+// ----------------- SQL config (optionnel) -----------------
+const dbConfig = {
+  user: process.env.DB_USER || null,
+  password: process.env.DB_PASSWORD || null,
+  server: process.env.DB_SERVER || null,
+  database: process.env.DB_NAME || null,
   options: { encrypt: false, trustServerCertificate: true }
 };
 
-// ----------------- Helpers -----------------
+// Utilitaire pour tenter connexion SQL (silencieux si non configuré)
+async function trySqlConnect() {
+  if (!dbConfig.user) return false;
+  try {
+    await sql.connect(dbConfig);
+    return true;
+  } catch (err) {
+    console.warn("SQL non connecté :", err.message || err);
+    return false;
+  }
+}
 
-/**
- * Vérifie que le mot de passe respecte les règles RGPD / bonnes pratiques :
- * - min 8 caractères
- * - majuscule, minuscule, chiffre, caractère spécial
- */
+// ----------------- Helpers -----------------
 function validatePassword(password) {
   const regex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{8,}$/;
   return regex.test(password);
 }
 
-/**
- * Middleware pour protéger routes HTTP
- */
+function createJwt(username) {
+  return jwt.sign({ username }, SECRET, { expiresIn: "30d" });
+}
+
+function verifyJwt(token) {
+  return jwt.verify(token, SECRET);
+}
+
 function authMiddleware(req, res, next) {
-  const token = req.headers["authorization"]?.split(" ")[1];
+  const auth = req.headers["authorization"];
+  const token = auth?.split?.(" ")[1];
   if (!token) return res.status(401).json({ success: false, message: "Token manquant" });
 
   try {
-    const decoded = jwt.verify(token, SECRET);
+    const decoded = verifyJwt(token);
     req.user = decoded;
     next();
-  } catch {
-    res.status(401).json({ success: false, message: "Token invalide" });
+  } catch (err) {
+    return res.status(401).json({ success: false, message: "Token invalide" });
   }
 }
 
-/**
- * Vérification admin/test pour bypass règles de mot de passe
- */
-async function isAdminOrTest(username) {
-  await sql.connect(config);
-  const result = await sql.query`SELECT IsAdmin, IsTest FROM Users WHERE Username = ${username}`;
-  if (result.recordset.length === 0) return false;
-  const user = result.recordset[0];
-  return user.IsAdmin || user.IsTest;
-}
+// ----------------- Routes HTTP : Auth -----------------
 
-// ----------------- Routes HTTP -----------------
-
-// 🔹 Signup simplifié : pseudo + mot de passe
-app.post("/signup", async (req, res) => {
+// Signup (simplifié) - rate limité
+app.post("/signup", loginLimiter, async (req, res) => {
   const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ success: false, message: "Pseudo/mot de passe manquant" });
 
-  if (!username || !password)
-    return res.status(400).json({ success: false, message: "Pseudo ou mot de passe manquant" });
+  // Si SQL configuré, insérer en DB. Sinon on renvoie succès (dev mode)
+  const hasSql = await trySqlConnect();
+  if (!hasSql) {
+    // Dev fallback : aucune persistance
+    return res.json({ success: true, message: "Compte simulé créé (mode dev, SQL non configuré)." });
+  }
 
   try {
-    await sql.connect(config);
+    // Vérifier existant
+    const check = await sql.query`SELECT Id FROM Users WHERE Username = ${username}`;
+    if (check.recordset.length > 0) return res.status(400).json({ success: false, message: "Pseudo existant" });
 
-    // Vérifie pseudo existant
-    const checkUsername = await sql.query`SELECT * FROM Users WHERE Username = ${username}`;
-    if (checkUsername.recordset.length > 0)
-      return res.status(400).json({ success: false, message: "Ce pseudo existe déjà !" });
+    if (!validatePassword(password))
+      return res.status(400).json({ success: false, message: "Mot de passe non sécurisé (min8, maj, min, chiffre, special)" });
 
-    // 🔹 Vérification mot de passe RGPD
-    const skipRules = await isAdminOrTest(username);
-    if (!skipRules && !validatePassword(password)) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Mot de passe non sécurisé. Il doit contenir 8+ caractères, majuscule, minuscule, chiffre et caractère spécial."
-      });
-    }
-
-    // 🔹 Hash du mot de passe
     const hash = await bcrypt.hash(password, 12);
-
-    // 🔹 Insertion dans la base
     await sql.query`INSERT INTO Users (Username, PasswordHash) VALUES (${username}, ${hash})`;
 
-    // 🔹 Retour frontend
-    console.log("Utilisateur créé :", username);
-    res.json({ success: true, message: "Compte créé ! Tu peux maintenant te connecter." });
+    return res.json({ success: true, message: "Compte créé" });
   } catch (err) {
-    console.error("Erreur signup :", err);
-    res.status(500).json({ success: false, message: "Erreur serveur, réessaie plus tard." });
+    console.error("Signup error:", err);
+    return res.status(500).json({ success: false, message: "Erreur serveur" });
   }
 });
 
-// 🔹 Login
-app.post("/login", async (req, res) => {
+// Login
+app.post("/login", loginLimiter, async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ success: false, message: "Pseudo/mot de passe manquant" });
+
+  const hasSql = await trySqlConnect();
+  if (!hasSql) {
+    // Mode dev : accepte n'importe quoi, renvoie token (pratique pour dev local)
+    const token = createJwt(username);
+    return res.json({ success: true, message: "Connexion (mode dev)", token });
+  }
+
   try {
-    const { username, password } = req.body;
-
-    await sql.connect(config);
-
-    const result = await sql.query`
-      SELECT Username, PasswordHash
-      FROM Users
-      WHERE Username = ${username}
-    `;
-
-    if (result.recordset.length === 0) {
-      return res.json({ success: false, message: "Utilisateur introuvable." });
-    }
+    const result = await sql.query`SELECT Username, PasswordHash FROM Users WHERE Username = ${username}`;
+    if (result.recordset.length === 0) return res.status(400).json({ success: false, message: "Utilisateur introuvable" });
 
     const user = result.recordset[0];
+    const match = await bcrypt.compare(password, user.PasswordHash);
+    if (!match) return res.status(400).json({ success: false, message: "Mot de passe incorrect" });
 
-    const isMatch = await bcrypt.compare(password, user.PasswordHash);
-    if (!isMatch) {
-      return res.json({ success: false, message: "Mot de passe incorrect." });
-    }
-
-    // 🔥 IMPORTANT : on garantit AUCUNE redirection 2FA
-    const token = jwt.sign(
-      { username: user.Username },
-      SECRET,
-      { expiresIn: "30d" }
-    );
-
-    return res.json({
-      success: true,
-      message: "Connexion réussie !",
-      token,
-      redirect: "../hubjeux" // facultatif mais propre
-    });
+    const token = createJwt(user.Username);
+    res.json({ success: true, message: "Connexion réussie", token });
 
   } catch (err) {
-    console.error("Erreur login :", err);
-    return res.json({ success: false, message: "Erreur serveur." });
+    console.error("Login error:", err);
+    res.status(500).json({ success: false, message: "Erreur serveur" });
   }
 });
 
+// ----------------- Routes HTTP : Scores, questions -----------------
 
-
-
-// ----------------- Scores -----------------
+// Enregistrer score (protégé)
 app.post("/scores", authMiddleware, async (req, res) => {
   const { username, game, score } = req.body;
-  if (!username || !game || score === undefined)
-    return res.status(400).json({ success: false, message: "Données manquantes" });
+  if (!username || !game || typeof score !== "number") return res.status(400).json({ success: false, message: "Données manquantes" });
+  if (req.user.username !== username) return res.status(403).json({ success: false, message: "Non autorisé" });
 
-  if (req.user.username !== username)
-    return res.status(403).json({ success: false, message: "Non autorisé" });
+  const hasSql = await trySqlConnect();
+  if (!hasSql) return res.json({ success: true, message: "Score simulé (dev mode)" });
 
   try {
-    await sql.connect(config);
-    await sql.query`
-      INSERT INTO Scores (Username, Game, Score, DateAchieved)
-      VALUES (${username}, ${game}, ${score}, GETDATE())
-    `;
-    res.json({ success: true, message: "Score enregistré !" });
+    await sql.query`INSERT INTO Scores (Username, Game, Score, DateAchieved) VALUES (${username}, ${game}, ${score}, GETDATE())`;
+    res.json({ success: true });
   } catch (err) {
-    console.error("Erreur ajout score :", err);
-    res.status(500).json({ success: false, message: "Erreur serveur" });
+    console.error("Scores insert error:", err);
+    res.status(500).json({ success: false });
   }
 });
 
-app.get("/getScore/:username/:game", authMiddleware, async (req, res) => {
-  const { username, game } = req.params;
-  if (req.user.username !== username)
-    return res.status(403).json({ success: false, message: "Non autorisé" });
-
-  try {
-    await sql.connect(config);
-    const result = await sql.query`
-      SELECT TOP 1 Score, DateAchieved
-      FROM Scores
-      WHERE Username = ${username} AND Game = ${game}
-      ORDER BY DateAchieved DESC
-    `;
-    res.json({ success: true, score: result.recordset[0]?.Score || 0 });
-  } catch (err) {
-    console.error("Erreur getScore :", err);
-    res.status(500).json({ success: false, message: "Erreur serveur" });
-  }
+// Récupérer questions par thème (sert les fichiers du dossier public/)
+// Ex: GET /questions/minecraft
+app.get("/questions/:theme", (req, res) => {
+  const theme = req.params.theme || "minecraft";
+  const filePath = path.join(__dirname, "public", `${theme.toLowerCase()}.json`);
+  fs.readFile(filePath, "utf8", (err, data) => {
+    if (err) {
+      return res.status(404).json({ success: false, message: "Thème introuvable" });
+    }
+    try {
+      const parsed = JSON.parse(data);
+      return res.json({ success: true, questions: parsed });
+    } catch (e) {
+      return res.status(500).json({ success: false, message: "Erreur lecture fichier" });
+    }
+  });
 });
 
-app.get("/scores/:game", authMiddleware, async (req, res) => {
-  const { game } = req.params;
-  try {
-    await sql.connect(config);
-    const result = await sql.query`
-      SELECT Username, MAX(Score) AS Score, MAX(DateAchieved) AS DateAchieved
-      FROM Scores
-      WHERE Game = ${game}
-      GROUP BY Username
-      ORDER BY MAX(Score) DESC
-    `;
-    res.json({ success: true, scores: result.recordset });
-  } catch (err) {
-    console.error("Erreur récupération scores :", err);
-    res.status(500).json({ success: false, message: "Erreur serveur" });
-  }
-});
+// Petite route healthcheck
+app.get("/health", (req, res) => res.json({ success: true, uptime: process.uptime() }));
 
-// ----------------- Socket.IO -----------------
+// ----------------- Socket.IO - Quizz Multijoueur -----------------
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "https://chic-torte-4d4c16.netlify.app" } });
+const io = new Server(server, {
+  cors: { origin: FRONTEND_ORIGINS }
+});
 
+// Middleware socket pour vérifier token JWT (optionnel mais recommandé)
 io.use((socket, next) => {
-  const token = socket.handshake.auth?.token;
-  if (!token) return next(new Error("Token manquant"));
   try {
-    const user = jwt.verify(token, SECRET);
-    socket.user = user;
+    const token = socket.handshake.auth?.token;
+    if (!token) return next(new Error("Token manquant"));
+    const user = verifyJwt(token);
+    socket.user = user; // { username }
     next();
-  } catch {
+  } catch (err) {
     next(new Error("Token invalide"));
   }
 });
 
+// Stockage en mémoire des salons (simple). Pour prod, utiliser Redis.
 const rooms = {};
 
+/**
+ * Structure d'une room :
+ * rooms[roomName] = {
+ *   host: 'username',
+ *   players: [{ username, score }],
+ *   questions: [ ... ],
+ *   index: 0,
+ *   pointsToWin: 100,
+ *   timePerQuestion: 30
+ * }
+ */
+
 io.on("connection", (socket) => {
-  console.log("🟢 Joueur connecté :", socket.user.username);
+  const username = socket.user?.username || `guest_${socket.id.slice(0,5)}`;
+  console.log(`Socket connecté : ${username} (${socket.id})`);
 
-  socket.on("joinRoom", ({ username, room }) => {
-    if (username !== socket.user.username) return;
+  // Create room (emité par créateur)
+  socket.on("createRoom", ({ room }) => {
+    if (!room) return socket.emit("errorMsg", "Room invalide");
     socket.join(room);
-    socket.username = username;
     socket.room = room;
+    socket.username = username;
 
-    if (!rooms[room]) rooms[room] = [];
-    rooms[room].push({ id: socket.id, username, score: 0 });
+    rooms[room] = rooms[room] || {};
+    rooms[room].host = username;
+    rooms[room].players = [{ username, score: 0 }];
+    rooms[room].questions = [];
+    rooms[room].index = 0;
 
-    io.to(room).emit("updatePlayers", rooms[room].map(p => p.username));
-    socket.to(room).emit("message", `${username} a rejoint la partie.`);
+    io.to(room).emit("updatePlayers", rooms[room].players.map(p => p.username));
+    socket.emit("created", { room });
+    console.log(`${username} a créé la room ${room}`);
   });
 
-  // Les autres événements Socket.IO peuvent être ajoutés ici (startGame, submitAnswer, etc.)
+  // Join room
+  socket.on("joinRoom", ({ room }) => {
+    if (!room) return socket.emit("errorMsg", "Room invalide");
+    socket.join(room);
+    socket.room = room;
+    socket.username = username;
+
+    rooms[room] = rooms[room] || { players: [], questions: [], index: 0 };
+    // si déjà présent, éviter doublons
+    if (!rooms[room].players.find(p => p.username === username)) {
+      rooms[room].players.push({ username, score: 0 });
+    }
+
+    io.to(room).emit("updatePlayers", rooms[room].players.map(p => p.username));
+    console.log(`${username} a rejoint ${room}`);
+  });
+
+  // Start game (host only) - payload : { room, theme, pointsToWin, timePerQuestion }
+  socket.on("startGame", async ({ room, theme = "minecraft", pointsToWin = 100, timePerQuestion = 30 }) => {
+    const r = rooms[room];
+    if (!r) return socket.emit("errorMsg", "Room introuvable");
+    if (r.host !== username) return socket.emit("errorMsg", "Seul le créateur peut lancer");
+
+    // Charge questions depuis public/<theme>.json
+    const filePath = path.join(__dirname, "public", `${theme.toLowerCase()}.json`);
+    let questions = [];
+    try {
+      const raw = fs.readFileSync(filePath, "utf8");
+      questions = JSON.parse(raw);
+    } catch (err) {
+      console.error("Erreur load questions:", err);
+      socket.emit("errorMsg", "Impossible de charger les questions");
+      return;
+    }
+
+    // Initialisation de la room
+    r.questions = questions;
+    r.index = 0;
+    r.pointsToWin = pointsToWin;
+    r.timePerQuestion = timePerQuestion;
+
+    // Notifier tous les joueurs
+    io.to(room).emit("launchGame", { room, pointsToWin, timePerQuestion, totalQuestions: questions.length });
+    // Envoyer le premier lot de questions (ou la totalité selon ton design)
+    io.to(room).emit("startQuestions", { questions: questions }); // client gère la pagination
+    console.log(`Partie lancée dans ${room} (theme=${theme})`);
+  });
+
+  // joinGame (utilisé par startquizzmulti pour s'inscrire côté serveur)
+  socket.on("joinGame", ({ room, username: providedName }) => {
+    // déjà implémenté via joinRoom, on peut accepter les deux
+    const r = rooms[room];
+    if (!r) return socket.emit("errorMsg", "Room introuvable");
+    if (!r.players.find(p => p.username === username))
+      r.players.push({ username, score: 0 });
+    io.to(room).emit("updatePlayers", r.players.map(p => p.username));
+  });
+
+  // submitAnswer
+  socket.on("submitAnswer", ({ room, questionIndex, answer }) => {
+    const r = rooms[room];
+    if (!r) return;
+    const q = r.questions?.[questionIndex];
+    if (!q) {
+      socket.emit("errorMsg", "Question introuvable");
+      return;
+    }
+
+    // Vérifier la réponse (q.answer peut être string ou array)
+    const correct = Array.isArray(q.answer) ? q.answer.includes(answer) : q.answer === answer;
+
+    if (correct) {
+      const player = r.players.find(p => p.username === username);
+      if (player) {
+        player.score = (player.score || 0) + (q.points || 10); // q.points facultatif
+      }
+    }
+
+    // Mettre à jour scores pour tous
+    io.to(room).emit("scoreUpdate", r.players);
+
+    // Indiquer la bonne réponse à tous
+    io.to(room).emit("showAnswer", { questionIndex, correctAnswer: q.answer, by: username });
+  });
+
+  // timeout (le client notifie quand le chrono est expiré)
+  socket.on("timeout", ({ room, questionIndex }) => {
+    const r = rooms[room];
+    if (!r) return;
+    const q = r.questions?.[questionIndex];
+    if (!q) return;
+    io.to(room).emit("showAnswer", { questionIndex, correctAnswer: q.answer, by: null });
+  });
+
+  // Déconnexion : retirer de la room
+  socket.on("disconnect", () => {
+    const rName = socket.room;
+    if (!rName || !rooms[rName]) return;
+    const r = rooms[rName];
+    r.players = r.players.filter(p => p.username !== username);
+    io.to(rName).emit("updatePlayers", r.players.map(p => p.username));
+    console.log(`${username} déconnecté de ${rName}`);
+
+    // Si plus personne, cleanup
+    if (r.players.length === 0) {
+      delete rooms[rName];
+      console.log(`Room ${rName} supprimée (vide)`);
+    } else {
+      // si host parti, choisir un nouveau host
+      if (r.host === username) {
+        r.host = r.players[0].username;
+        io.to(rName).emit("hostChanged", { host: r.host });
+      }
+    }
+  });
+
 });
 
-// ----------------- Démarrage serveur -----------------
+// ----------------- Démarrage -----------------
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => console.log(`Serveur sécurisé démarré sur http://localhost:${PORT}`));
+server.listen(PORT, () => {
+  console.log(`Serveur démarré sur http://localhost:${PORT} (PORT ${PORT})`);
+});
