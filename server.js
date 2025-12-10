@@ -236,7 +236,7 @@ app.get("/scores/:game", authMiddleware, async (req, res) => {
 
 // ----------------- Socket.IO -----------------
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "http://localhost:5173" } });
+const io = new Server(server, { cors: { origin: "https://chic-torte-4d4c16.netlify.app" } });
 
 io.use((socket, next) => {
   const token = socket.handshake.auth?.token;
