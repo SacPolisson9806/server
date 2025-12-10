@@ -211,8 +211,14 @@ app.get("/health", (req, res) => res.json({ success: true, uptime: process.uptim
 // ----------------- Socket.IO - Quizz Multijoueur -----------------
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: FRONTEND_ORIGINS }
+  cors: {
+    origin: FRONTEND_ORIGINS,
+    methods: ["GET", "POST"],
+    credentials: true,
+    allowedHeaders: ["Authorization"]
+  }
 });
+
 
 // Middleware socket pour vérifier token JWT (optionnel mais recommandé)
 io.use((socket, next) => {
